@@ -5,6 +5,42 @@ from prediction_endpoint import FraudDetector, PredictionOutput, PredictionInput
 from ml.user_behavior import UserBehavior
 from ml.alerts import AlertService
 from ml.dashboard import Dashboard
+from ml.data_preprocessing import preprocess_data
+from ml.feature_engineering import create_interaction_features
+from ml.hyperparameter_tuning import tune_hyperparameters
+from pydantic import BaseModel, Field, validator
+from datetime import datetime
+import pandas as pd
+
+# Definição do modelo AlertInput
+class AlertInput(BaseModel):
+    message: str
+
+# Definição do modelo DashboardReport
+class DashboardReport(BaseModel):
+    total_frauds: int
+    total_transactions: int
+    fraud_rate: float
+
+# Definição do modelo PredictionInput com validações
+class PredictionInput(BaseModel):
+    user_id: int
+    amount: float = Field(..., gt=0, description="Valor da transação deve ser maior que zero.")
+    product_id: int
+    transaction_type: str
+    timestamp: datetime
+
+    @validator('amount')
+    def check_amount(cls, v):
+        if v > 10000:  # Exemplo de limite
+            raise ValueError("Valor da transação não pode ser superior a 10.000.")
+        return v
+
+    @validator('timestamp')
+    def check_time(cls, v):
+        if v.hour < 6 or v.hour > 22:  # Exemplo de horário incomum
+            raise ValueError("Transações só podem ocorrer entre 6h e 22h.")
+        return v
 
 # Configuração da API
 app = FastAPI()
@@ -31,10 +67,22 @@ async def startup():
     except Exception as e:
         raise RuntimeError(f"Failed to load model during startup: {e}")
 
-@app.post("/v1/prediction", response_model=PredictionOutput)
-async def prediction(input_data: PredictionInput, api_key: str = Depends(authenticate)) -> PredictionOutput:
-    output = fraud_model.predict(input_data)
-    return output
+@app.post("/v1/prediction", response_model=dict)
+async def prediction(input_data: PredictionInput, api_key: str = Depends(authenticate)):
+    df = pd.DataFrame([input_data.dict()])
+    df = preprocess_data(df)
+    df = create_interaction_features(df)
+    output = fraud_model.predict(df)
+
+    # Supondo que o modelo retorna uma pontuação de fraude
+    fraud_score = output['fraud_score']  # Exemplo de como obter a pontuação
+    reason = "Valor da transação é incomum para o perfil do usuário."  # Exemplo de razão
+
+    return {
+        "is_fraudulent": output['is_fraudulent'],
+        "fraud_score": fraud_score,
+        "reason": reason
+    }
 
 @app.post("/v1/user-behavior", response_model=dict)
 async def analyze_user_behavior(user_data: List[float], api_key: str = Depends(authenticate)):
@@ -60,32 +108,12 @@ async def get_dashboard_report(api_key: str = Depends(authenticate)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# Novo endpoint de teste de fraude
-@app.post("/v1/test-fraud-detection", response_model=PredictionOutput)
-async def test_fraud_detection(input_data: PredictionInput, api_key: str = Depends(authenticate)):
-    """
-    Endpoint para testar a detecção de fraudes com dados fictícios.
-
-    - **user_id**: ID do usuário.
-    - **amount**: Valor da compra.
-    - **product_id**: ID do produto.
-    - **transaction_type**: Tipo de transação.
-    - **timestamp**: Data e hora da compra.
-
-    **Exemplo de Request Body**:
-    ```json
-    {
-        "user_id": 123,
-        "amount": 150.75,
-        "product_id": 456,
-        "transaction_type": "purchase",
-        "timestamp": "2023-03-18T12:00:00"
-    }
-    ```
-
-    **Resposta**:
-    - **200 OK**: Retorna um objeto que indica se a compra é fraudulenta.
-    """
-    if input_data.amount > 100:  # Exemplo de regra fictícia
-        return PredictionOutput(is_fraudulent=True)
-    return PredictionOutput(is_fraudulent=False)
+@app.post("/v1/tune-hyperparameters", response_model=dict)
+async def tune_model(api_key: str = Depends(authenticate)):
+    try:
+        df = pd.read_csv('path_to_your_dataset.csv')  # Ajuste o caminho para o seu dataset
+        X, y = preprocess_data(df)
+        best_model = tune_hyperparameters(X, y)
+        return {"status": "Hyperparameters tuned successfully", "model": str(best_model)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
